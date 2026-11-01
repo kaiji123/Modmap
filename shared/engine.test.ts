@@ -12,3 +12,35 @@ test('does not merge simulated and real evidence',()=>{assert.equal(detect(Array
 test('masks originals, deduplicates ingest, and expires data',()=>{const engine=new Engine();engine.ingest(event(0));engine.ingest(event(0));const snap=engine.snapshot(now);assert.equal(snap.messages.length,1);assert.ok(!JSON.stringify(snap).includes('tr4sh'));assert.equal(engine.reveal('m0'),'you are tr4sh at this game');assert.equal(engine.snapshot(now).reveals,1);assert.equal(engine.snapshot(now+121_000).nodes.length,0);assert.equal(engine.reveal('m0'),undefined);});
 
 test('reports each shared target accurately',()=>{const raid=Array.from({length:6},(_,i)=>event(i,{mentions:['alice','bob']}));assert.deepEqual(detect(raid,now).map(a=>a.target).sort(),['alice','bob']);});
+
+test('toxic-word statistics aggregate spellings, occurrences, unique users and messages',()=>{
+ const engine=new Engine();
+ const first=event(10,{userId:'sim:alice',userName:'Alice',text:'tr4sh TRASH garbage'});
+ engine.ingest(first);engine.ingest(first);
+ engine.ingest(event(11,{userId:'sim:alice',userName:'Alice',text:'tr\u200bash idiot'}));
+ engine.ingest(event(12,{userId:'sim:bob',userName:'Bob',text:'trash garbage garbage'}));
+ const words=engine.snapshot(now).toxicWords!;
+ assert.deepEqual(words.map(word=>[word.word,word.count,word.messageCount]),[['trash',4,3],['garbage',3,2],['idiot',1,1]]);
+ assert.deepEqual(words[0].users.map(user=>[user.userName,user.count,user.messageCount]),[['Alice',3,2],['Bob',1,1]]);
+ assert.ok(!JSON.stringify(words).includes('tr4sh'));
+});
+test('word matching ignores substrings and normalizes spaced or repeated letters',async()=>{
+ const {matchedToxicWords}=await import('./engine');
+ assert.deepEqual(matchedToxicWords('trashcan trashing'),[]);
+ assert.deepEqual(matchedToxicWords('i d i o t stuuupid'),['idiot','stupid']);
+});
+test('word statistics use the whole rolling window and respond to removal, expiry and reset',()=>{
+ const engine=new Engine();
+ engine.ingest(event(0,{userId:'sim:alice',text:'trash'}));
+ for(let i=1;i<=105;i++)engine.ingest(event(i,{userId:'sim:bob',text:'hello chat'}));
+ let snapshot=engine.snapshot(now);
+ assert.equal(snapshot.messages.length,100);
+ assert.equal(snapshot.toxicWords?.[0].count,1);
+ assert.equal(snapshot.toxicWords?.[0].users[0].userId,'sim:alice');
+ engine.removeUserMessages('sim:alice');
+ assert.deepEqual(engine.snapshot(now).toxicWords,[]);
+ engine.ingest(event(200,{text:'garbage'}));
+ assert.deepEqual(engine.snapshot(now+121_000).toxicWords,[]);
+ engine.ingest(event(201,{ts:now+121_001,text:'idiot'}));engine.reset();
+ assert.deepEqual(engine.snapshot(now+121_001).toxicWords,[]);
+});

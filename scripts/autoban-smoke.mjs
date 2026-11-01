@@ -1,0 +1,40 @@
+import assert from 'node:assert/strict';
+import {setTimeout as sleep} from 'node:timers/promises';
+import {io} from 'socket.io-client';
+const response=await fetch('http://127.0.0.1:3000/api/session');assert.ok(response.ok);
+const cookie=response.headers.get('set-cookie')?.split(';')[0];assert.ok(cookie);
+const socket=io('http://127.0.0.1:3000',{transports:['websocket'],extraHeaders:{Cookie:cookie}});
+let latest;
+socket.on('snapshot',value=>{latest=value;});
+async function until(check,timeout=14000){const deadline=Date.now()+timeout;while(Date.now()<deadline){if(check())return;await sleep(40);}throw new Error('Timed out waiting for autoban state');}
+const settings=(config,mode='simulation')=>new Promise((resolve,reject)=>socket.timeout(5000).emit('configureAutoBan',{mode,config},(error,result)=>error?reject(error):resolve(result)));
+const config={enabled:true,words:['trash'],excludeGiftGivers:true,excludeSubscribers:true};
+try{
+ await until(()=>latest);
+ assert.equal(latest.autoBan.enabled,false);
+ socket.emit('reset');await until(()=>latest.messages.length===5&&!latest.running);
+ assert.equal((await settings(config)).ok,true);
+ socket.emit('simulate');
+ await until(()=>latest.autoBan.events.some(event=>event.userId==='sim:ember_03'&&event.outcome==='excluded'));
+ assert.ok(latest.autoBan.events.some(event=>event.userId==='sim:echo_01'&&event.outcome==='banned'&&event.simulated));
+ assert.ok(latest.autoBan.events.some(event=>event.userId==='sim:echo_02'&&event.outcome==='excluded'));
+ assert.ok(latest.autoBan.events.some(event=>event.userId==='sim:echo_05'&&event.outcome==='excluded'));
+ assert.equal(latest.nodes.find(node=>node.id==='sim:echo_02').restriction,undefined);
+ assert.equal(latest.nodes.find(node=>node.id==='sim:ember_03').restriction,undefined);
+ assert.equal(latest.nodes.find(node=>node.id==='sim:echo_01').restriction,'ban');
+ assert.ok(latest.moderation.find(entry=>entry.userId==='sim:echo_01').automatic);
+ socket.emit('reset');await until(()=>latest.messages.length===5&&!latest.running&&!latest.autoBan.enabled);
+ assert.equal((await settings({...config,excludeGiftGivers:false,excludeSubscribers:false})).ok,true);
+ socket.emit('simulate');await until(()=>latest.nodes.find(node=>node.id==='sim:echo_02')?.restriction==='ban');
+ assert.equal((await settings({...config,enabled:false})).ok,true);
+ await until(()=>latest.nodes.some(node=>node.id==='sim:echo_03'&&!node.restriction));
+ assert.equal(latest.autoBan.enabled,false);
+ assert.ok(!latest.autoBan.events.some(event=>event.userId==='sim:echo_03'&&event.outcome==='banned'));
+ socket.emit('view','live');await until(()=>latest.mode==='live');
+ assert.equal((await settings(config)).ok,false);
+ assert.equal((await settings(config,'live')).ok,false);
+ socket.emit('view','simulation');await until(()=>latest.mode==='simulation');
+ assert.equal(latest.autoBan.enabled,false);
+ socket.emit('reset');await until(()=>latest.messages.length===5&&!latest.running&&!latest.autoBan.events.length);
+ console.log('PASS: simulated autoban, gift/subscriber exemptions, ban-all policy, disable, source permissions, view switching and reset. No Twitch mutations.');
+}finally{socket.disconnect();}

@@ -1,0 +1,65 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {Simulation} from './simulation';
+import {seedLines,raidLines,scenarioEvent} from './scenario';
+import {eligibleUser,toxicUsers} from '../shared/moderation';
+const now=1_000_000;
+function fixture(){const engine=new Simulation();seedLines.forEach((line,i)=>engine.ingest(scenarioEvent(line,`seed-${i}`,now)));raidLines.slice(0,6).forEach((line,i)=>engine.ingest(scenarioEvent(line,`raid-${i}`,now)));return engine;}
+test('simulation ban removes attack evidence, blocks future chat and supports local unban',()=>{
+ const engine=fixture(),id='sim:echo_01';
+ assert.equal(engine.snapshot(now).alerts.length,1);
+ engine.moderate(id,'ban',undefined,now);
+ let snapshot=engine.snapshot(now);
+ assert.equal(snapshot.nodes.find(n=>n.id===id)?.restriction,'ban');
+ assert.ok(snapshot.edges.every(e=>e.source!==id));
+ assert.ok(snapshot.messages.every(e=>e.userId!==id));
+ assert.equal(snapshot.toxicWords?.find(word=>word.word==='trash')?.count,5);
+ engine.ingest(scenarioEvent(raidLines[0],'blocked',now+100));
+ assert.ok(engine.snapshot(now+100).messages.every(e=>e.id!=='sim:blocked'));
+ assert.equal(engine.snapshot(now+100).toxicWords?.find(word=>word.word==='trash')?.count,5);
+ engine.moderate(id,'unban',undefined,now+200);
+ snapshot=engine.snapshot(now+200);
+ assert.equal(snapshot.nodes.find(n=>n.id===id)?.restriction,undefined);
+ assert.ok(snapshot.messages.some(m=>m.userId===id&&m.score===0));
+ assert.equal(snapshot.moderation?.find(e=>e.userId===id)?.simulated,true);
+ engine.ingest(scenarioEvent(raidLines[0],'resumed',now+300));
+ assert.ok(engine.snapshot(now+300).edges.some(e=>e.source===id));
+});
+test('simulation timeouts expire and reset clears restrictions and action history',()=>{
+ const engine=fixture(),id='sim:echo_01';
+ engine.moderate(id,'timeout',1,now);
+ assert.equal(engine.snapshot(now+999).nodes.find(n=>n.id===id)?.restriction,'timeout');
+ assert.equal(engine.snapshot(now+1000).nodes.find(n=>n.id===id)?.restriction,undefined);
+ assert.ok(engine.snapshot(now+1000).messages.some(m=>m.userId===id&&m.score===0));
+ engine.moderate(id,'ban',undefined,now+2000);engine.reset();
+ assert.equal(engine.snapshot(now+2000).nodes.length,0);
+ assert.equal(engine.snapshot(now+2000).moderation?.length,0);
+});
+test('simulation refuses real identities, protected broadcaster, unknown users and invalid durations',()=>{
+ const engine=fixture();
+ assert.throws(()=>engine.moderate('twitch:viewer','ban'),/known simulated/);
+ assert.throws(()=>engine.moderate('sim:unknown','ban'),/known simulated/);
+ assert.throws(()=>engine.moderate('sim:Kai','ban'),/protected/);
+ assert.throws(()=>engine.moderate('sim:echo_01','timeout',0),/duration/);
+ assert.throws(()=>engine.ingest({...scenarioEvent(raidLines[0],'real',now),simulated:false}),/Only simulated/);
+ const nodes=engine.snapshot(now).nodes;
+ assert.equal(eligibleUser(nodes.find(n=>n.id==='sim:echo_01')!,'simulation'),true);
+ assert.equal(eligibleUser(nodes.find(n=>n.id==='sim:Kai')!,'simulation'),false);
+ assert.equal(toxicUsers(nodes,undefined,'simulation').length,6);
+ assert.equal(toxicUsers(nodes,undefined,'live').length,0);
+});
+test('scenario creates overlapping hostile groups, multiple targets and supportive interactions',()=>{
+ const engine=new Simulation();
+ seedLines.forEach((line,i)=>engine.ingest(scenarioEvent(line,`seed-${i}`,now)));
+ raidLines.forEach((line,i)=>engine.ingest(scenarioEvent(line,`raid-${i}`,now+i*100)));
+ const snapshot=engine.snapshot(now+raidLines.length*100);
+ assert.ok(snapshot.nodes.length>=19);
+ assert.ok(new Set(snapshot.edges.filter(e=>e.score>.6).map(e=>e.target)).size>=5);
+ assert.ok(snapshot.edges.some(e=>e.source==='sim:echo_01'&&e.target==='sim:pixelpilot'&&e.score>.6));
+ assert.ok(snapshot.edges.some(e=>e.source==='sim:ember_01'&&e.target==='sim:echo_01'&&e.score>.6));
+ assert.ok(snapshot.edges.some(e=>e.source==='sim:cozycat'&&e.target==='sim:Kai'&&e.score===0));
+ assert.ok(snapshot.messages.some(m=>m.mentions.length>1));
+ assert.ok(snapshot.messages.some(m=>m.replyToUserId));
+ const targets=new Set(snapshot.alerts.map(a=>a.target));
+ assert.ok(targets.has('sim:Kai'));assert.ok(targets.has('sim:luna'));
+});
