@@ -1,0 +1,17 @@
+import {spawnSync} from 'node:child_process';
+import {mkdirSync,existsSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
+const root=fileURLToPath(new URL('../',import.meta.url));
+mkdirSync(root+'assets/codex',{recursive:true});mkdirSync(root+'exports',{recursive:true});
+const binary=root+'assets/codex/window-recorder';
+const compile=spawnSync('swiftc',['-parse-as-library',root+'scripts/record-codex.swift','-o',binary],{stdio:'inherit'});
+if(compile.status)process.exit(compile.status??1);
+const stamp=new Date().toISOString().replace(/[:.]/g,'-');
+const raw=root+'assets/codex/codex-'+stamp+'.mov';
+const record=spawnSync(binary,[raw,process.argv[2]??'45'],{stdio:'inherit'});
+if(record.status)process.exit(record.status??1);
+if(!existsSync(raw))throw Error('Recording output is missing');
+const output=root+'exports/04-codex-real-'+stamp+'.mp4';
+const encode=spawnSync('ffmpeg',['-y','-i',raw,'-vf','scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=0x0a1019,fps=30','-an','-c:v','libx264','-crf','18','-pix_fmt','yuv420p','-movflags','+faststart',output],{stdio:'inherit'});
+if(encode.status)process.exit(encode.status??1);
+console.log('Genuine Codex screen recording: '+output);

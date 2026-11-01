@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 import { SupportStore } from './support';
 import { validTimeout } from '../shared/moderation';
-import type { ChatEvent, TwitchStatus, ModerationAction, SupportData } from '../shared/types';
+import type { ChatEvent, TwitchStatus, ModerationAction, SupportData, BannedUser } from '../shared/types';
 
 export interface TwitchConfig {
   clientId: string;
@@ -73,6 +73,10 @@ export class TwitchConnection {
   private attempts = 0;
   private support = new SupportStore();
   private supportLoading?:Promise<void>;
+  private bannedUsers:BannedUser[]=[];
+  private bansUpdatedAt?:number;
+  private bansError?:string;
+  private bansLoading?:Promise<void>;
 
   constructor(
     private config: TwitchConfig,
@@ -184,6 +188,29 @@ export class TwitchConnection {
     throw new Error(errors[response.status] ?? 'Twitch could not confirm this action. Check Twitch before retrying.');
   }
   supportSnapshot(ids:string[]):SupportData {return this.support.snapshot(ids);}
+  bannedUsersSnapshot(){return {users:[...this.bannedUsers],updatedAt:this.bansUpdatedAt,error:this.bansError};}
+  async refreshBannedUsers():Promise<void>{
+    if(this.bansLoading)return this.bansLoading;
+    if(!this.tokens||!this.identity||!this.identity.scopes.includes('moderator:manage:banned_users')){this.bansError='Reconnect Twitch to grant banned-user read permission.';this.changed();return;}
+    const generation=this.generation;
+    const work=async()=>{
+      try{
+        const users:BannedUser[]=[];let cursor:string|undefined;
+        do{
+          const query=new URLSearchParams({broadcaster_id:this.identity!.user_id});if(cursor)query.set('after',cursor);
+          const response=await this.supportRequest(`https://api.twitch.tv/helix/moderation/banned?${query}`,{},generation);
+          if(!response.ok)throw new Error(response.status===403?'Twitch denied access to the channel ban list.':`Twitch returned HTTP ${response.status} while loading bans.`);
+          const body=record(await response.json());
+          for(const item of Array.isArray(body.data)?body.data:[]){const row=record(item),id=text(row.user_id);if(id)users.push({userId:`twitch:${id}`,userName:text(row.user_name)||text(row.user_login)||id,login:text(row.user_login)||id,createdAt:text(row.created_at),expiresAt:text(row.expires_at)||undefined,reason:text(row.reason)||undefined});}
+          cursor=text(record(body.pagination).cursor)||undefined;
+        }while(cursor&&generation===this.generation);
+        if(generation!==this.generation)return;
+        this.bannedUsers=users;this.bansUpdatedAt=Date.now();this.bansError=undefined;
+      }catch(error){if(generation===this.generation)this.bansError=error instanceof Error?error.message:'Could not load Twitch bans.';}
+      finally{if(generation===this.generation)this.changed();}
+    };
+    this.bansLoading=work().finally(()=>{this.bansLoading=undefined;});return this.bansLoading;
+  }
   private async supportRequest(url:string,init:RequestInit,generation:number):Promise<Response>{
     const call=()=>this.request(url,{...init,headers:{...init.headers,Authorization:`Bearer ${this.tokens!.access_token}`,'Client-Id':this.config.clientId}});
     let response=await call();

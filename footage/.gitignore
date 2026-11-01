@@ -1,0 +1,6 @@
+node_modules/
+.hyperframes/
+assets/raw/
+assets/*-raw.webm
+exports/
+assets/codex/

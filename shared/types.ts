@@ -3,11 +3,12 @@ export interface Message extends Omit<ChatEvent,'text'> {text:string;score:numbe
 export interface UserNode {id:string;name:string;count:number;score:number;simulated:boolean;restriction?:"ban"|"timeout";restrictedUntil?:number}
 export interface Edge {source:string;target:string;count:number;score:number}
 export interface Alert {target:string;senders:number;messages:number;similarity:number;simulated:boolean}
-export interface Snapshot {nodes:UserNode[];edges:Edge[];messages:Message[];alerts:Alert[];running:boolean;reveals:number;mode?:"simulation"|"live";twitch?:TwitchStatus;moderation?:ModerationEntry[];toxicWords?:ToxicWordStat[];support?:SupportData;autoBan?:AutoBanState}
+export interface Snapshot {nodes:UserNode[];edges:Edge[];messages:Message[];alerts:Alert[];running:boolean;reveals:number;mode?:"simulation"|"live";twitch?:TwitchStatus;moderation?:ModerationEntry[];bannedUsers?:BannedUser[];bansUpdatedAt?:number;bansError?:string;toxicWords?:ToxicWordStat[];support?:SupportData;autoBan?:AutoBanState}
 
 export interface TwitchStatus {phase:"disconnected"|"connecting"|"connected"|"reconnecting"|"error";login?:string;userId?:string;error?:string;canModerate?:boolean;canReadSubscriptions?:boolean}
 
 export interface ModerationEntry {userId:string;userName:string;action:ModerationAction;duration?:number;ts:number;simulated?:boolean;automatic?:boolean}
+export interface BannedUser {userId:string;userName:string;login:string;createdAt:string;expiresAt?:string;reason?:string}
 export interface ModerationResult {ok:boolean;error?:string;simulated?:boolean}
 
 export type ModerationAction = "ban"|"unban"|"timeout";

@@ -50,8 +50,16 @@ interface Context {
 const contexts = new Map<string, Context>();
 function snapshot(context: Context): Snapshot {
   const graph=(context.mode==='live'?context.live:context.simulation).snapshot(Date.now(),Boolean(context.timer));
+  if(context.mode==='live') for(const node of graph.nodes){
+    const action=context.moderation.get(node.id);
+    if(!action)continue;
+    const active=action.action==='ban'||(action.action==='timeout'&&Date.now()<action.ts+(action.duration??0)*1000);
+    if(active&&action.action!=='unban'){node.restriction=action.action; if(action.action==='timeout')node.restrictedUntil=action.ts+(action.duration??0)*1000;}
+  }
   const supportIds=[...new Set([...graph.nodes.map(node=>node.id),...(graph.moderation??[]).map(entry=>entry.userId),...context.moderation.keys()])];
-  return {...graph,autoBan:context.autoBan[context.mode].snapshot(),support:context.mode==='simulation'?simulatedSupport(supportIds):context.twitch.supportSnapshot(supportIds),mode:context.mode,twitch:context.twitch.status(),moderation:context.mode==='simulation'?graph.moderation:[...context.moderation.values()].sort((a,b)=>b.ts-a.ts)};
+  const bans=context.twitch.bannedUsersSnapshot();
+  const simulatedBans=(graph.moderation??[]).filter(entry=>entry.action==='ban').map(entry=>({userId:entry.userId,userName:entry.userName,login:entry.userName,createdAt:new Date(entry.ts).toISOString()}));
+  return {...graph,autoBan:context.autoBan[context.mode].snapshot(),support:context.mode==='simulation'?simulatedSupport(supportIds):context.twitch.supportSnapshot(supportIds),mode:context.mode,twitch:context.twitch.status(),moderation:context.mode==='simulation'?graph.moderation:[...context.moderation.values()].sort((a,b)=>b.ts-a.ts),bannedUsers:context.mode==='live'?bans.users:simulatedBans,bansUpdatedAt:bans.updatedAt,bansError:context.mode==='live'?bans.error:undefined};
 }
 
 function publish(context: Context) { io.to(context.id).emit('snapshot', snapshot(context)); }
@@ -111,15 +119,19 @@ async function moderateUser(context:Context,mode:'simulation'|'live',userId:stri
   const status=context.twitch.status();
   if(!status.canModerate)return {ok:false,error:'Reconnect Twitch to grant ban and unban permission.'};
   const node=context.live.snapshot().nodes.find(n=>n.id===userId&&!n.simulated),known=context.moderation.get(userId);
-  if((!node&&!known)||!userId.startsWith('twitch:')||userId===status.userId)return {ok:false,error:'Select another real Twitch chatter from this session.'};
+  const listedBan=action==='unban'?context.twitch.bannedUsersSnapshot().users.find(user=>user.userId===userId):undefined;
+  if((!node&&!known&&!listedBan)||!userId.startsWith('twitch:')||userId===status.userId)return {ok:false,error:'Select another real Twitch chatter from this session.'};
   if(context.pending.has(userId))return {ok:false,error:'An action for this user is already in progress.'};
   context.pending.add(userId);
   try{
     await context.twitch.moderate(userId,action,duration,autoWord?`ModMap autoban word rule: ${autoWord}`:undefined);
     if(context.twitch.status().userId!==status.userId)throw new Error('Session changed. Check Twitch for the result.');
-    context.moderation.set(userId,{userId,userName:node?.name??known!.userName,action,...(action==='timeout'?{duration}:{}),ts:Date.now(),automatic:autoWord!==undefined});
+    context.moderation.set(userId,{userId,userName:node?.name??known?.userName??listedBan?.userName??userId.slice(7),action,...(action==='timeout'?{duration}:{}),ts:Date.now(),automatic:autoWord!==undefined});
     if(action==='unban')context.autoBan.live.unban(userId);
-    publish(context);return {ok:true};
+    publish(context);
+    void context.twitch.refreshBannedUsers();
+    if(action==='timeout')setTimeout(()=>{if(context.expires>Date.now()&&context.mode==='live')publish(context);},duration!*1000);
+    return {ok:true};
   }catch(error){return {ok:false,error:error instanceof Error?error.message:'Could not complete moderation.'};}
   finally{context.pending.delete(userId);}
 }
@@ -148,7 +160,7 @@ io.on('connection', socket => {
     if (mode !== 'simulation' && mode !== 'live') return;
     switchMode(context,mode);
     if (mode === 'live') stop(context);
-    publish(context);
+    publish(context);if(mode==='live')void context.twitch.refreshBannedUsers();
   });
   socket.on('reset', () => {
     context.autoBan[context.mode].reset();
@@ -180,6 +192,7 @@ io.on('connection', socket => {
     catch(error){reply({ok:false,error:error instanceof Error?error.message:'Could not update autoban.'});}
   });
   socket.on('refreshSupport',()=>{if(context.mode==='live')void context.twitch.refreshSupport();});
+  socket.on('refreshBans',()=>{if(context.mode==='live')void context.twitch.refreshBannedUsers();});
   socket.on('disconnectTwitch', () => {
     context.autoBan.live.pause('Disabled by Twitch disconnect.');
     context.oauth = undefined; context.twitch.disconnect(); context.live.reset(); context.moderation.clear();
